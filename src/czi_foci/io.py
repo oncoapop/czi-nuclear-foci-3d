@@ -25,10 +25,23 @@ class SampleMetadata:
     acquisition_date_folder: str
 
 
-def pixel_size_um(metadata: dict, mode: str = "2d") -> tuple[float, float, float]:
+def pixel_size_um(
+    metadata: dict,
+    mode: str = "2d",
+    resolution_level: int = 0,
+) -> tuple[float, float, float]:
+    """Voxel size in microns as (z, y, x).
+
+    ``resolution_level`` applies to .ims files only and MUST match the level
+    the pixel data was read at — the Imaris pyramid halves Y/X per level while
+    ``DataSetInfo/Image`` always reports level-0 dimensions. CZI has no
+    pyramid here, so the argument is ignored for that format.
+    """
     if "has_dataset_info" in metadata:
         # .ims metadata shape (see ims_reader.inspect_ims).
-        return ims_reader.pixel_size_um_ims(metadata, mode=mode)
+        return ims_reader.pixel_size_um_ims(
+            metadata, mode=mode, resolution_level=resolution_level
+        )
 
     values: dict[str, float] = {}
     for item in metadata.get("scaling") or []:
@@ -67,9 +80,22 @@ def inspect_czi(path: Path) -> dict:
     return czi_reader.inspect(path, include_stats=False, preview_dir=None, plane_dir=None)
 
 
-def read_channel_arrays(path: Path, inspection: dict, mode: str = "2d") -> dict[int, np.ndarray]:
+def read_channel_arrays(
+    path: Path,
+    inspection: dict,
+    mode: str = "2d",
+    resolution_level: int = 0,
+) -> dict[int, np.ndarray]:
+    """Read per-channel pixel data.
+
+    For .ims, pair every call with ``pixel_size_um(..., resolution_level=N)``
+    using the same ``resolution_level``, or physical-unit measurements will be
+    wrong by a factor of 2**N.
+    """
     if path.suffix.lower() == ".ims":
-        return ims_reader.read_channel_arrays_ims(path, inspection, mode=mode)
+        return ims_reader.read_channel_arrays_ims(
+            path, inspection, mode=mode, resolution_level=resolution_level
+        )
 
     arrays_by_channel: dict[int, dict[int, np.ndarray]] = {}
     with path.open("rb") as handle:

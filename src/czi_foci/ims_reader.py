@@ -83,11 +83,31 @@ def inspect_ims(path: Path) -> dict:
             else:
                 result["errors"].append("missing DataSetInfo group")
 
+            level_dims: dict[int, dict[str, int]] = {}
+            for level_name in levels:
+                level_group = dataset[level_name]
+                if "TimePoint 0" not in level_group:
+                    continue
+                timepoint = level_group["TimePoint 0"]
+                channel_names = sorted(timepoint.keys())
+                if not channel_names:
+                    continue
+                attrs = timepoint[channel_names[0]].attrs
+                try:
+                    level_dims[int(level_name.rsplit(" ", 1)[-1])] = {
+                        "x": int(_decode_attr(attrs["ImageSizeX"])),
+                        "y": int(_decode_attr(attrs["ImageSizeY"])),
+                        "z": int(_decode_attr(attrs["ImageSizeZ"])),
+                    }
+                except (KeyError, ValueError):
+                    continue
+
             result["metadata"] = {
                 "image": image_attrs,
                 "channels": channel_attrs,
                 "custom": custom_attrs,
                 "has_dataset_info": has_info,
+                "levels": level_dims,
             }
 
             if image_attrs.get("Z"):
@@ -184,11 +204,65 @@ def read_channel_arrays_ims(
     return arrays
 
 
-def pixel_size_um_ims(metadata: dict, mode: str = "3d") -> tuple[float, float, float]:
+def read_channel_planes_ims(
+    path: Path,
+    channel_indices: list[int],
+    z_index: int,
+    resolution_level: int = 0,
+) -> dict[int, np.ndarray]:
+    """Read a single Z slice of one or more channels, without loading the full stack.
+
+    ``read_channel_arrays_ims`` always loads the whole (padded) 3D array for
+    every channel before slicing, which is wasteful when only one plane is
+    needed per channel (e.g. flat-field estimation at full resolution, where
+    a full ResolutionLevel 0 stack can be ~100+ MB per channel). h5py supports
+    partial reads via hyperslab selection, so ``data[z_index]`` here reads
+    only that one plane from disk.
+
+    Opens the file once and reads every requested channel from it, so a
+    multi-channel read costs one file open, not one per channel.
+    """
+    level_name = f"ResolutionLevel {resolution_level}"
+    planes: dict[int, np.ndarray] = {}
+    with h5py.File(path, "r") as handle:
+        dataset = handle["DataSet"]
+        if level_name not in dataset:
+            raise ValueError(f"{level_name} not present in {path}")
+        tp0 = dataset[level_name]["TimePoint 0"]
+        for index in channel_indices:
+            channel_name = f"Channel {index}"
+            if channel_name not in tp0 or "Data" not in tp0[channel_name]:
+                continue
+            data = tp0[channel_name]["Data"]
+            if z_index >= data.shape[0]:
+                raise ValueError(
+                    f"z_index {z_index} out of bounds for shape {data.shape} in {path} ({channel_name})"
+                )
+            planes[index] = data[z_index]
+    return planes
+
+
+def pixel_size_um_ims(
+    metadata: dict,
+    mode: str = "3d",
+    resolution_level: int = 0,
+) -> tuple[float, float, float]:
     """Compute (z, y, x) voxel size in microns from .ims Image attrs.
 
-    z is None (nan) when Z <= 1 (single-plane acquisitions have no z-step).
-    Never hardcode this — z-step varies between folders on this instrument.
+    ``DataSetInfo/Image`` X/Y are always the *level-0* dimensions, but the
+    pyramid halves Y/X at each level, so the spacing of a level-N read is
+    coarser by the ratio of level-0 to level-N width. ``resolution_level``
+    MUST match the level the pixel data was read at — pass the same value
+    given to :func:`read_channel_arrays_ims`. Getting this wrong silently
+    reports level-0 spacing for level-N pixels (4x too small at level 2),
+    which corrupts every physical-unit measurement downstream.
+
+    Z is never downsampled by the pyramid (levels 0-4 keep full Z), so the
+    z-step is level-independent; the one exception is the deepest level on
+    some files, which is handled by reading the declared per-level Z.
+
+    z is nan when Z <= 1 (single-plane acquisitions have no z-step).
+    Never hardcode the z-step — it varies between folders on this instrument.
     """
     image = metadata.get("image", {})
 
@@ -198,12 +272,24 @@ def pixel_size_um_ims(metadata: dict, mode: str = "3d") -> tuple[float, float, f
             raise ValueError(f"Missing required .ims Image attribute: {key}")
         return float(value)
 
-    x_px = _f("X")
-    y_px = _f("Y")
+    levels = metadata.get("levels") or {}
+    level = levels.get(resolution_level) or levels.get(str(resolution_level))
+    if level:
+        x_px = float(level["x"])
+        y_px = float(level["y"])
+        z_px = int(level["z"])
+    else:
+        # No per-level dimensions recorded: fall back to the pyramid's
+        # halving rule. Exact for power-of-two image widths, which is the
+        # case for every tile on this instrument (2048x2048).
+        scale = 2 ** int(resolution_level)
+        x_px = _f("X") / scale
+        y_px = _f("Y") / scale
+        z_px = int(_f("Z"))
+
     xy_x = (_f("ExtMax0") - _f("ExtMin0")) / x_px
     xy_y = (_f("ExtMax1") - _f("ExtMin1")) / y_px
 
-    z_px = int(_f("Z"))
     if z_px > 1:
         z_step = (_f("ExtMax2") - _f("ExtMin2")) / (z_px - 1)
     else:
@@ -218,6 +304,48 @@ def stage_position_mm(metadata: dict) -> tuple[float, float]:
     x_um = float(image["ExtMin0"]) if image.get("ExtMin0") else float("nan")
     y_um = float(image["ExtMin1"]) if image.get("ExtMin1") else float("nan")
     return x_um / 1000.0, y_um / 1000.0
+
+
+def resolve_channel_indices(metadata: dict) -> dict[str, int]:
+    """Map excitation wavelength to channel index, from the recorded channel names.
+
+    Channel order is NOT fixed and must never be assumed. On the Andor .ims
+    files DAPI is channel 1, not channel 0 — a positional assumption taken
+    from the Zeiss .czi convention segments nuclei out of the wrong channel.
+
+    Returns a dict keyed by excitation wavelength, e.g.
+    ``{"405": 1, "488": 2, "561": 0}``. Raises if the channel set is not the
+    expected 405/488/561 triple, rather than silently mislabelling.
+
+    This deliberately keys on *wavelength*, not on marker. Which fluorophore
+    carries which antibody is a property of the staining round, not of the
+    file, and belongs in the experiment config.
+    """
+    channels = metadata.get("channels") or {}
+    if not channels:
+        raise ValueError("No channel metadata available to resolve channel indices")
+
+    resolved: dict[str, int] = {}
+    for index, attrs in channels.items():
+        name = (attrs or {}).get("Name", "")
+        excitation = (attrs or {}).get("LSMExcitationWavelength", "")
+        for wavelength in ("405", "488", "561"):
+            if name.startswith(wavelength) or excitation.startswith(wavelength):
+                if wavelength in resolved:
+                    raise ValueError(
+                        f"Two channels both resolve to {wavelength} nm "
+                        f"(indices {resolved[wavelength]} and {index})"
+                    )
+                resolved[wavelength] = int(index)
+                break
+
+    missing = {"405", "488", "561"} - set(resolved)
+    if missing:
+        observed = {i: (a or {}).get("Name", "") for i, a in channels.items()}
+        raise ValueError(
+            f"Unexpected channel set: could not resolve {sorted(missing)}. Observed: {observed}"
+        )
+    return resolved
 
 
 def channel_metadata_ims(metadata: dict, index: int) -> str:
