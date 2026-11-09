@@ -15,6 +15,9 @@ dependencies = [
   "reportlab",
   "scipy",
   "scikit-image",
+  # src/czi_foci/current_dataset_plots.py imports pyplot at module level, so
+  # this is a hard runtime dependency and was simply missing.
+  "matplotlib",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +30,34 @@ dependencies = [
 # constraints-analysis.txt for the full exact set.
 test = [
   "aicspylibczi==4.0.1",
+]
+
+# The analysis environment, pinned.
+#
+# A constraints file alone does NOT reproduce an environment: `-c` only bounds
+# packages something else already selected for installation. Review found that
+# `pip install -e '.[test]' -c constraints-analysis.txt` installed no matplotlib
+# at all, because neither the base dependencies nor the test extra requested it,
+# and a constraint on an unrequested package does nothing. This extra does the
+# selecting; the constraints file bounds the transitive closure as well.
+#
+# Versions read from the installed distributions of the pinned interpreter
+# (CPython 3.11.4) via importlib.metadata -- not inferred. Keep in step with
+# constraints-analysis.txt; tests/test_environment_pins.py fails if they drift.
+analysis = [
+  "numpy==1.26.2",
+  "scipy==1.13.1",
+  "scikit-image==0.24.0",
+  "pandas==2.1.4",
+  "matplotlib==3.8.1",
+  "Pillow==11.0.0",
+  "reportlab==4.0.8",
+  # Reading .ims (Imaris) data. The README previously recorded that h5py was
+  # needed but "not declared here", leaving the documented 3-D workflow to a
+  # package the install never supplied. czi_foci.ims_reader lands on
+  # feature/ims-reader; pinning it here keeps that branch's workflow installable
+  # from the documented command rather than reopening the same gap.
+  "h5py==3.16.0",
 ]
 
 [project.scripts]

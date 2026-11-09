@@ -26,23 +26,44 @@ From this directory:
 ```zsh
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[test]' -c constraints-analysis.txt
+pip install -e '.[analysis,test]' -c constraints-analysis.txt
 ```
 
-[`constraints-analysis.txt`](constraints-analysis.txt) pins the exact versions
-every published analysis was produced under:
+**Both halves of that command are needed.** A constraints file only bounds packages
+that something else has already selected; `-c` on a package nobody requested is
+silently inert. The earlier documented command omitted the `analysis` extra and so
+installed **no matplotlib at all** — neither the base dependencies nor the `test`
+extra requested it, and the constraint on it did nothing. The `analysis` extra does
+the selecting; the constraints file bounds the transitive closure too.
 
-| package | version |
-|---|---|
-| python | 3.11.4 |
-| numpy | 1.26.2 |
-| scipy | 1.13.1 |
-| scikit-image | **0.24.0** |
-| pandas | 2.1.4 |
-| matplotlib | 3.8.1 |
-| Pillow | 11.0.0 |
-| reportlab | 4.0.8 |
-| aicspylibczi | 4.0.1 (test extra) |
+The versions, pinned by the `analysis` extra and recorded in
+[`constraints-analysis.txt`](constraints-analysis.txt):
+
+| package | version | where |
+|---|---|---|
+| python | 3.11.4 | interpreter — see the caveat below |
+| numpy | 1.26.2 | `analysis` |
+| scipy | 1.13.1 | `analysis` |
+| scikit-image | **0.24.0** | `analysis` |
+| pandas | 2.1.4 | `analysis` |
+| matplotlib | 3.8.1 | `analysis` |
+| Pillow | 11.0.0 | `analysis` |
+| reportlab | 4.0.8 | `analysis` |
+| h5py | 3.16.0 | `analysis` — `.ims` (Imaris) reading |
+| aicspylibczi | 4.0.1 | `test` |
+
+Two things this still does not pin:
+
+- **The interpreter.** `python3 -m venv` builds against whatever `python3` invoked
+  it; it cannot give you 3.11.4 on request. Check `python -V` after activating, or
+  build the environment with conda, which can pin the interpreter.
+- **The full transitive closure.** `constraints-analysis.txt` lists direct
+  dependencies, not every package in the environment. It is a pin set, not a lock
+  file.
+
+`tests/test_environment_pins.py` fails if `pyproject.toml` and
+`constraints-analysis.txt` drift apart, or if a declared runtime dependency is left
+out of the `analysis` extra — the shape of the matplotlib bug above.
 
 The `test` extra pulls in `aicspylibczi`, which the real-file half of
 `tests/test_czi_reader_offsets.py` needs to cross-check this package's CZI
@@ -61,11 +82,15 @@ env CZI_TEST_MANIFEST=/path/to/sample_sheet.csv PYTHONPATH=src \
 Setting `CZI_TEST_MANIFEST` is an explicit request for the real-file comparison,
 so it **fails** rather than skips if `aicspylibczi` is missing or the manifest
 resolves to no readable file. It accepts a directory of `.czi`, a single `.czi`,
-or a CSV with a `source_path` column. Leave it unset and that test skips, so a
-checkout without the acquisition volume still runs green.
+or a CSV with a `source_path` column. Setting it also **disables the
+`sample_sheet.csv` fallback** — a manifest naming files that cannot be resolved
+must fail rather than quietly compare some other dataset. Leave it unset and the
+repo's own `sample_sheet.csv` is used; with neither, the test skips, so a checkout
+without the acquisition volume still runs green.
 
-Reading `.ims` (Imaris) data needs `h5py`, which is not declared here; the 3-D
-scripts under `scripts/` expect it in the environment already.
+Reading `.ims` (Imaris) data needs `h5py`, now pinned in the `analysis` extra. It
+was previously undeclared, so the documented install left the 3-D scripts under
+`scripts/` expecting a package nothing supplied.
 
 ## Run A New 3-Channel Experiment
 

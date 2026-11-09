@@ -1,10 +1,20 @@
-# Exact versions of the environment every published analysis was produced in.
+# Versions of the DIRECT dependencies the published analyses were produced
+# under. This is not a full lock file: it does not enumerate the transitive
+# closure, and it cannot pin the interpreter.
 #
 # Recorded by reading the installed distributions of the pinned interpreter
 # (/Users/dyap/miniconda3/bin/python3) with importlib.metadata -- not inferred
 # from any requirements file, changelog or prior documentation.
 #
-# Interpreter: CPython 3.11.4
+# Interpreter: CPython 3.11.4. `python3 -m venv` does NOT enforce this -- it
+# builds against whatever python3 invoked it. Check the version yourself, or
+# build the environment with conda, which can pin the interpreter.
+#
+# A constraints file ALONE REPRODUCES NOTHING. `-c` only bounds packages that
+# something else has already selected for installation; a constraint on a
+# package nobody requested is silently inert. That is why the install command
+# below uses the `analysis` extra -- which does the selecting -- rather than
+# this file on its own.
 #
 # WHY THIS FILE EXISTS
 # --------------------
@@ -18,9 +28,9 @@
 #
 # Install with these constraints when reproducing or extending an analysis:
 #
-#     pip install -e '.[test]' -c constraints-analysis.txt
+#     pip install -e '.[analysis,test]' -c constraints-analysis.txt
 #
-# See README.md, "Reproducible analysis environment".
+# See README.md, "Environment - read this before installing".
 
 numpy==1.26.2
 scipy==1.13.1
@@ -29,6 +39,11 @@ pandas==2.1.4
 matplotlib==3.8.1
 Pillow==11.0.0
 reportlab==4.0.8
+
+# Reading .ims (Imaris) data. Previously recorded in README.md as needed but
+# "not declared here", which left the documented workflow to a package the
+# install never supplied.
+h5py==3.16.0
 
 # Reader cross-validation. Required by the real-file half of
 # tests/test_czi_reader_offsets.py, which compares this package's CZI decoding
