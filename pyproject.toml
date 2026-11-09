@@ -17,6 +17,18 @@ dependencies = [
   "scikit-image",
 ]
 
+[project.optional-dependencies]
+# Reader cross-validation. tests/test_czi_reader_offsets.py compares this
+# package's CZI decoding against an independent implementation (aicspylibczi
+# wraps Zeiss's libCZI). That comparison is what caught the data_offset bug, so
+# without it the suite can go green having never checked a real pixel.
+#
+# Pinned to the version the analysis environment runs; see
+# constraints-analysis.txt for the full exact set.
+test = [
+  "aicspylibczi==4.0.1",
+]
+
 [project.scripts]
 czi-foci = "czi_foci.cli:main"
 

@@ -14,16 +14,58 @@ files and does not upload image data.
 
 ## Install
 
+> **Do not `pip install -e .` without constraints if you intend to run an
+> analysis.** `pyproject.toml` declares its runtime dependencies without upper
+> bounds, so a plain install resolves to whatever is current that day. Newer
+> scikit-image changes `peak_local_max`, `watershed` and `threshold_otsu`
+> behaviour, and segmentation output changes with it — silently. Nothing errors;
+> the numbers just stop matching every previously published figure.
+
 From this directory:
 
 ```zsh
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e '.[test]' -c constraints-analysis.txt
 ```
 
+[`constraints-analysis.txt`](constraints-analysis.txt) pins the exact versions
+every published analysis was produced under:
+
+| package | version |
+|---|---|
+| python | 3.11.4 |
+| numpy | 1.26.2 |
+| scipy | 1.13.1 |
+| scikit-image | **0.24.0** |
+| pandas | 2.1.4 |
+| matplotlib | 3.8.1 |
+| Pillow | 11.0.0 |
+| reportlab | 4.0.8 |
+| aicspylibczi | 4.0.1 (test extra) |
+
+The `test` extra pulls in `aicspylibczi`, which the real-file half of
+`tests/test_czi_reader_offsets.py` needs to cross-check this package's CZI
+decoding against an independent implementation of the format. That comparison is
+what caught the `data_offset` bug; without the extra installed it cannot run,
+and the suite can go green having never checked a real pixel.
+
 The package tests use the standard library `unittest`, so no separate test
-runner is required.
+runner is required:
+
+```zsh
+env CZI_TEST_MANIFEST=/path/to/sample_sheet.csv PYTHONPATH=src \
+    python -m unittest discover -s tests -t tests
+```
+
+Setting `CZI_TEST_MANIFEST` is an explicit request for the real-file comparison,
+so it **fails** rather than skips if `aicspylibczi` is missing or the manifest
+resolves to no readable file. It accepts a directory of `.czi`, a single `.czi`,
+or a CSV with a `source_path` column. Leave it unset and that test skips, so a
+checkout without the acquisition volume still runs green.
+
+Reading `.ims` (Imaris) data needs `h5py`, which is not declared here; the 3-D
+scripts under `scripts/` expect it in the environment already.
 
 ## Run A New 3-Channel Experiment
 

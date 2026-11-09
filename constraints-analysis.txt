@@ -1,0 +1,43 @@
+# Exact versions of the environment every published analysis was produced in.
+#
+# Recorded by reading the installed distributions of the pinned interpreter
+# (/Users/dyap/miniconda3/bin/python3) with importlib.metadata -- not inferred
+# from any requirements file, changelog or prior documentation.
+#
+# Interpreter: CPython 3.11.4
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# pyproject.toml declares runtime dependencies without upper bounds, so a plain
+# `pip install -e .` resolves to whatever is current that day. scikit-image in
+# particular changes segmentation behaviour between releases: peak_local_max,
+# watershed and threshold_otsu have all shifted semantics across versions, and
+# nuclei/foci counts move with them. An analysis run against a different
+# scikit-image is not comparable to any previously published figure, and the
+# difference is silent -- nothing errors, the numbers just change.
+#
+# Install with these constraints when reproducing or extending an analysis:
+#
+#     pip install -e '.[test]' -c constraints-analysis.txt
+#
+# See README.md, "Reproducible analysis environment".
+
+numpy==1.26.2
+scipy==1.13.1
+scikit-image==0.24.0
+pandas==2.1.4
+matplotlib==3.8.1
+Pillow==11.0.0
+reportlab==4.0.8
+
+# Reader cross-validation. Required by the real-file half of
+# tests/test_czi_reader_offsets.py, which compares this package's CZI decoding
+# against an independent implementation (aicspylibczi wraps Zeiss's libCZI).
+# That comparison is what caught the data_offset bug; without this package
+# installed it cannot run.
+aicspylibczi==4.0.1
+
+# NOT a dependency of this package: Cellpose nuclei segmentation runs in its
+# own conda environment (numpy<2, numba) and is invoked separately. Pinned here
+# only as a record of what the published segmentation used.
+# cellpose==3.1.1.1

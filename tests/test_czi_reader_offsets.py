@@ -141,12 +141,31 @@ class ReaderMatchesReferenceTests(unittest.TestCase):
     """Decoded pixels must match an independent CZI implementation."""
 
     def setUp(self) -> None:
+        # Setting CZI_TEST_MANIFEST is an explicit request for this comparison.
+        # Skipping it then would report success for work that never happened,
+        # which is how the data_offset bug survived review in the first place.
+        # Unasked-for (no env var) it still skips, so CI without data stays green.
+        requested = os.environ.get(MANIFEST_ENV)
+        install_hint = "pip install -e '.[test]' -c constraints-analysis.txt"
+
         try:
             import aicspylibczi  # noqa: F401
         except ImportError:
-            self.skipTest("aicspylibczi not installed")
+            if requested:
+                self.fail(
+                    f"{MANIFEST_ENV} is set, so the real-file comparison was asked "
+                    f"for, but aicspylibczi is missing and it cannot run. Install "
+                    f"the pinned test extra: {install_hint}"
+                )
+            self.skipTest(f"aicspylibczi not installed; enable with: {install_hint}")
+
         self.samples = discover_czi()
         if not self.samples:
+            if requested:
+                self.fail(
+                    f"{MANIFEST_ENV}={requested!r} was supplied but resolved to no "
+                    "readable .czi file, so the comparison did not run"
+                )
             self.skipTest(
                 f"no CZI reachable; set {MANIFEST_ENV} to a .czi directory or a CSV "
                 "with a source_path column"
