@@ -20,9 +20,16 @@ with a `source_path` column (the repo's sample_sheet.csv has one)::
     CZI_TEST_MANIFEST=/path/to/sample_sheet.csv \\
         python -m unittest discover -s tests -t tests
 
-Without it the test falls back to sample_sheet.csv at the repo root, and
-skips if neither is reachable. A skip here means the comparison did NOT run;
-check the skip reason rather than reading a green suite as verification.
+Without it the test falls back to sample_sheet.csv at the repo root, and skips
+if neither is reachable. **Set it and that fallback is off**: a manifest naming
+files that cannot be resolved must fail, not quietly compare some other
+dataset. Review found the earlier version doing exactly that -- a deliberately
+dead manifest still compared three files from sample_sheet.csv, and the
+verification that was supposed to prove fail-closed behaviour had passed only
+because the worktree it ran in had no sample sheet.
+
+A skip here means the comparison did NOT run; check the skip reason rather than
+reading a green suite as verification.
 """
 from __future__ import annotations
 
@@ -113,11 +120,18 @@ class SubblockOffsetTests(unittest.TestCase):
 
 
 def discover_czi(limit: int = 3) -> list[Path]:
-    """Real CZI files from CZI_TEST_MANIFEST, else the repo's sample_sheet.csv."""
+    """Real CZI files from CZI_TEST_MANIFEST, else the repo's sample_sheet.csv.
+
+    Setting the environment variable disables the sample_sheet.csv fallback.
+    An explicitly supplied manifest that resolves to nothing has to come back
+    empty so the caller can fail; silently substituting a different dataset
+    would report a comparison against files the caller never asked for.
+    """
     sources: list[Path] = []
     configured = os.environ.get(MANIFEST_ENV)
-    candidates = [Path(configured)] if configured else []
-    candidates.append(REPO_ROOT / "sample_sheet.csv")
+    candidates = (
+        [Path(configured)] if configured else [REPO_ROOT / "sample_sheet.csv"]
+    )
 
     for candidate in candidates:
         if candidate.is_dir():
@@ -141,12 +155,31 @@ class ReaderMatchesReferenceTests(unittest.TestCase):
     """Decoded pixels must match an independent CZI implementation."""
 
     def setUp(self) -> None:
+        # Setting CZI_TEST_MANIFEST is an explicit request for this comparison.
+        # Skipping it then would report success for work that never happened,
+        # which is how the data_offset bug survived review in the first place.
+        # Unasked-for (no env var) it still skips, so CI without data stays green.
+        requested = os.environ.get(MANIFEST_ENV)
+        install_hint = "pip install -e '.[test]' -c constraints-analysis.txt"
+
         try:
             import aicspylibczi  # noqa: F401
         except ImportError:
-            self.skipTest("aicspylibczi not installed")
+            if requested:
+                self.fail(
+                    f"{MANIFEST_ENV} is set, so the real-file comparison was asked "
+                    f"for, but aicspylibczi is missing and it cannot run. Install "
+                    f"the pinned test extra: {install_hint}"
+                )
+            self.skipTest(f"aicspylibczi not installed; enable with: {install_hint}")
+
         self.samples = discover_czi()
         if not self.samples:
+            if requested:
+                self.fail(
+                    f"{MANIFEST_ENV}={requested!r} was supplied but resolved to no "
+                    "readable .czi file, so the comparison did not run"
+                )
             self.skipTest(
                 f"no CZI reachable; set {MANIFEST_ENV} to a .czi directory or a CSV "
                 "with a source_path column"
@@ -160,8 +193,12 @@ class ReaderMatchesReferenceTests(unittest.TestCase):
             inspection = czi_reader.inspect(
                 path, include_stats=False, preview_dir=None, plane_dir=None
             )
-            reference = CziFile(str(path))
-            with self.subTest(czi=path.name):
+            # CziFile(str) opens a handle internally and exposes no close(), so
+            # every comparison file leaked one and emitted a ResourceWarning.
+            # Constructing it from a handle we own puts the lifetime back
+            # under `with`.
+            with path.open("rb") as stream, self.subTest(czi=path.name):
+                reference = CziFile(stream)
                 compared = 0
                 for block in inspection["subblocks"]:
                     if block["compression_code"] != 0:
@@ -189,6 +226,80 @@ class ReaderMatchesReferenceTests(unittest.TestCase):
                     )
                     compared += 1
                 self.assertGreater(compared, 0, f"{path.name}: no planes compared")
+
+
+class ManifestFallbackTests(unittest.TestCase):
+    """An explicitly supplied manifest must never fall back to sample_sheet.csv.
+
+    Regression test. `discover_czi` used to append the repo's sample_sheet.csv
+    to the candidate list unconditionally, so `CZI_TEST_MANIFEST` pointing at a
+    nonexistent path still resolved three files from the sample sheet and the
+    comparison ran against a dataset nobody asked for. The fail-closed check
+    added alongside it missed this because it ran in a worktree with no sample
+    sheet, leaving the fallback branch unexercised.
+
+    Builds its own fake repo root, so it needs no acquisition volume and is
+    unaffected by whether this checkout has a sample sheet.
+    """
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        decoy = root / "fallback.czi"
+        decoy.write_bytes(b"")                      # only has to exist
+        with (root / "sample_sheet.csv").open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["source_path"])
+            writer.writeheader()
+            writer.writerow({"source_path": str(decoy)})
+
+        self.root = root
+        self.decoy = decoy
+        self._saved_root = globals()["REPO_ROOT"]
+        globals()["REPO_ROOT"] = root
+        self._saved_env = os.environ.get(MANIFEST_ENV)
+        os.environ.pop(MANIFEST_ENV, None)
+
+    def tearDown(self) -> None:
+        globals()["REPO_ROOT"] = self._saved_root
+        if self._saved_env is None:
+            os.environ.pop(MANIFEST_ENV, None)
+        else:
+            os.environ[MANIFEST_ENV] = self._saved_env
+        self._tmp.cleanup()
+
+    def test_fallback_is_used_when_the_variable_is_unset(self) -> None:
+        """Guards the test below: the fallback has to be live for it to mean
+        anything. Without this, a broken sample sheet would make the
+        suppression test pass vacuously -- the exact failure being fixed."""
+        self.assertEqual(discover_czi(), [self.decoy])
+
+    def test_dead_manifest_does_not_fall_back(self) -> None:
+        os.environ[MANIFEST_ENV] = str(self.root / "no-such-manifest.csv")
+        self.assertEqual(
+            discover_czi(), [],
+            "a dead CZI_TEST_MANIFEST fell back to sample_sheet.csv; the "
+            "comparison would have run against files the caller never named",
+        )
+
+    def test_manifest_naming_only_unreadable_rows_does_not_fall_back(self) -> None:
+        """A manifest that exists but whose rows point nowhere is the same
+        failure wearing a different hat."""
+        dangling = self.root / "dangling.csv"
+        with dangling.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["source_path"])
+            writer.writeheader()
+            writer.writerow({"source_path": str(self.root / "missing.czi")})
+        os.environ[MANIFEST_ENV] = str(dangling)
+        self.assertEqual(discover_czi(), [])
+
+    def test_reader_comparison_fails_rather_than_skips_on_a_dead_manifest(self) -> None:
+        """End to end: the suite must go red, not green-with-a-skip."""
+        os.environ[MANIFEST_ENV] = str(self.root / "no-such-manifest.csv")
+        case = ReaderMatchesReferenceTests("test_every_channel_matches_aicspylibczi")
+        with self.assertRaises(case.failureException):
+            case.setUp()
 
 
 if __name__ == "__main__":
